@@ -1,0 +1,209 @@
+import assert from "node:assert/strict"
+import test from "node:test"
+
+import {
+  fakeImsgPath,
+  fileExists,
+  globalImessagePath,
+  imessageSourcePath,
+  importFreshModule,
+  listDirectory,
+  makeTempHome,
+  parseToolResult,
+  readJson,
+  readNdjson,
+  stateDirForHome,
+  withEnv,
+  writeStateRecord,
+} from "./helpers.js"
+
+test("rc_pending returns only new and stale inbound @RC requests", async () => {
+  const home = await makeTempHome()
+  const now = new Date("2026-03-30T10:00:00Z")
+  const staleTime = new Date(now.getTime() - 16 * 60 * 1000)
+
+  await writeStateRecord(home, "GUID-HANDLED", "handled", {
+    status: "handled",
+    messageGuid: "GUID-HANDLED",
+    chatId: 98,
+    handledAt: now.toISOString(),
+  })
+  await writeStateRecord(home, "GUID-PENDING", "pending", {
+    status: "pending",
+    messageGuid: "GUID-PENDING",
+    chatId: 98,
+    claimedAt: now.toISOString(),
+  })
+  await writeStateRecord(
+    home,
+    "GUID-STALE",
+    "pending",
+    {
+      status: "pending",
+      messageGuid: "GUID-STALE",
+      chatId: 98,
+      claimedAt: staleTime.toISOString(),
+    },
+    { mtime: staleTime },
+  )
+
+  const env = {
+    HOME: home,
+    IMSG_BIN: fakeImsgPath,
+    FAKE_IMSG_CHATS_JSON: JSON.stringify([
+      { id: 98, identifier: "+31612605237", service: "iMessage", last_message_at: now.toISOString() },
+    ]),
+    FAKE_IMSG_HISTORY_JSON: JSON.stringify([
+      { id: 11, guid: "GUID-NEW", chat_id: 98, is_from_me: false, text: "@RC: newest", created_at: now.toISOString() },
+      { id: 10, guid: "GUID-STALE", chat_id: 98, is_from_me: false, text: "@RC: stale pending", created_at: "2026-03-30T09:30:00Z" },
+      { id: 9, guid: "GUID-HANDLED", chat_id: 98, is_from_me: false, text: "@RC: already handled", created_at: "2026-03-30T09:20:00Z" },
+      { id: 8, guid: "GUID-PENDING", chat_id: 98, is_from_me: false, text: "@RC: still pending", created_at: "2026-03-30T09:10:00Z" },
+      { id: 7, guid: "GUID-NORMAL", chat_id: 98, is_from_me: false, text: "hello", created_at: "2026-03-30T09:00:00Z" },
+      { id: 6, guid: "GUID-FROM-ME", chat_id: 98, is_from_me: true, text: "@RC: sent by me", created_at: "2026-03-30T08:50:00Z" },
+      { id: 5, guid: "", chat_id: 98, is_from_me: false, text: "@RC: empty guid", created_at: "2026-03-30T08:40:00Z" },
+      { id: 4, guid: "GUID-BAD-CHAT", chat_id: 0, is_from_me: false, text: "@RC: bad chat", created_at: "2026-03-30T08:30:00Z" },
+    ]),
+  }
+  const module = await importFreshModule(imessageSourcePath, env)
+
+  const result = await withEnv(env, async () => parseToolResult(await module.rc_pending.execute({ chatLimit: 20, messageLimit: 50, limit: 20 })))
+
+  assert.equal(result.total, 2)
+  assert.deepEqual(
+    result.requests.map((request) => ({ guid: request.messageGuid, status: request.status })),
+    [
+      { guid: "GUID-NEW", status: "new" },
+      { guid: "GUID-STALE", status: "stale_pending" },
+    ],
+  )
+})
+
+test("oc_reply_once sends exactly once for concurrent calls", async () => {
+  const home = await makeTempHome()
+  const logFile = `${stateDirForHome(home)}/fake-imsg.ndjson`
+  const env = {
+    HOME: home,
+    IMSG_BIN: fakeImsgPath,
+    FAKE_IMSG_SEND_SLEEP_MS: "150",
+    FAKE_IMSG_LOG_FILE: logFile,
+  }
+  const module = await importFreshModule(imessageSourcePath, env)
+
+  const request = {
+    confirmed: true,
+    chatId: 98,
+    messageGuid: "GUID-RACE",
+    replyText: "Hello!",
+    requestText: "@RC: hello!",
+    service: "auto",
+    region: "NL",
+  }
+
+  const [left, right] = await withEnv(env, async () =>
+    Promise.all([
+      module.oc_reply_once.execute(request),
+      module.oc_reply_once.execute(request),
+    ]),
+  )
+  const results = [parseToolResult(left), parseToolResult(right)]
+
+  assert.equal(results.filter((result) => result.sent === true).length, 1)
+  assert.equal(results.filter((result) => result.skipped === true).length, 1)
+  assert.equal(results.find((result) => result.skipped === true)?.reason, "already_pending")
+
+  const sendCalls = (await readNdjson(logFile)).filter((entry) => entry.command === "send")
+  assert.equal(sendCalls.length, 1)
+})
+
+test("oc_reply_once cleans up pending state after send failure and can retry", async () => {
+  const home = await makeTempHome()
+  const stateDir = stateDirForHome(home)
+
+  const failingEnv = {
+    HOME: home,
+    IMSG_BIN: fakeImsgPath,
+    FAKE_IMSG_SEND_FAIL: "1",
+    FAKE_IMSG_SEND_FAIL_STDERR: "intentional send failure",
+  }
+  const failingModule = await importFreshModule(imessageSourcePath, failingEnv)
+
+  const request = {
+    confirmed: true,
+    chatId: 98,
+    messageGuid: "GUID-FAIL-ONCE",
+    replyText: "Hello!",
+    requestText: "@RC: hello!",
+    service: "auto",
+    region: "NL",
+  }
+
+  await assert.rejects(() => withEnv(failingEnv, async () => failingModule.oc_reply_once.execute(request)), /intentional send failure/)
+  assert.deepEqual(await listDirectory(stateDir), [])
+
+  const retryEnv = {
+    HOME: home,
+    IMSG_BIN: fakeImsgPath,
+  }
+  const retryModule = await importFreshModule(imessageSourcePath, retryEnv)
+  const retryResult = await withEnv(retryEnv, async () => parseToolResult(await retryModule.oc_reply_once.execute(request)))
+
+  assert.equal(retryResult.sent, true)
+  assert.equal(await fileExists(retryResult.statePath), true)
+})
+
+test("oc_reply_once reclaims stale pending messages", async () => {
+  const home = await makeTempHome()
+  const staleTime = new Date(Date.now() - 16 * 60 * 1000)
+
+  await writeStateRecord(
+    home,
+    "GUID-STALE-RECOVER",
+    "pending",
+    {
+      status: "pending",
+      messageGuid: "GUID-STALE-RECOVER",
+      chatId: 98,
+      claimedAt: staleTime.toISOString(),
+      replyText: "Old reply",
+    },
+    { mtime: staleTime },
+  )
+
+  const env = {
+    HOME: home,
+    IMSG_BIN: fakeImsgPath,
+  }
+  const module = await importFreshModule(imessageSourcePath, env)
+
+  const result = await withEnv(
+    env,
+    async () => parseToolResult(await module.oc_reply_once.execute({
+      confirmed: true,
+      chatId: 98,
+      messageGuid: "GUID-STALE-RECOVER",
+      replyText: "Fresh reply",
+      requestText: "@RC: retry",
+      service: "auto",
+      region: "NL",
+    })),
+  )
+
+  assert.equal(result.sent, true)
+  const record = await readJson(result.statePath)
+  assert.equal(record.outgoingText, "RC: Fresh reply")
+  assert.equal(record.status, "handled")
+})
+
+test("global tool shim exports the same tool set as the repo source", async () => {
+  const home = await makeTempHome()
+  const repoModule = await importFreshModule(imessageSourcePath, {
+    HOME: home,
+    IMSG_BIN: fakeImsgPath,
+  })
+  const globalModule = await importFreshModule(globalImessagePath, {
+    HOME: home,
+    IMSG_BIN: fakeImsgPath,
+  })
+
+  assert.deepEqual(Object.keys(globalModule).sort(), Object.keys(repoModule).sort())
+})

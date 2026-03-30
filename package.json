@@ -1,0 +1,13 @@
+{
+  "name": "opencode-imsg-connector",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --eval \"import('./tools-source/imessage.js')\"",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.3.6"
+  }
+}
