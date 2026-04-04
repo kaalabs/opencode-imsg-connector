@@ -16,7 +16,7 @@ function usage(code = 1) {
       "",
       "Options:",
       "  --server-url URL              OpenCode server URL (default: http://localhost:4096)",
-      "  --model PROVIDER/MODEL        Model to use (default: openai/gpt-5.4-mini)",
+      "  --model PROVIDER/MODEL        Model to use (default: openai/gpt-5.4)",
       "  --agent AGENT                 Agent to use (default: build)",
       "  --prompt PROMPT               Trigger prompt (default: RC_HEARTBEAT)",
       "  --chat-id ID                  Limit watch to a specific chat row ID",
@@ -39,7 +39,7 @@ function usage(code = 1) {
 function parseArgs(argv) {
   const options = {
     serverUrl: "http://localhost:4096",
-    model: "openai/gpt-5.4-mini",
+    model: "openai/gpt-5.4",
     agent: "build",
     prompt: "RC_HEARTBEAT",
     chatId: "",

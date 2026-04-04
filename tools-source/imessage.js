@@ -11,6 +11,16 @@ const IMSG_BIN = process.env.IMSG_BIN ?? "imsg"
 const OPENCODE_HOME = join(homedir(), ".config", "opencode")
 const OC_STATE_DIR = join(OPENCODE_HOME, "state", "imessage-oc")
 const OC_PENDING_MAX_AGE_MS = 15 * 60 * 1000
+const REQUEST_KIND_CONFIG = {
+  rc: {
+    incomingPrefix: "@RC",
+    outgoingPrefix: "RC:",
+  },
+  drboz: {
+    incomingPrefix: "@DRBOZ",
+    outgoingPrefix: "DRBOZ:",
+  },
+}
 
 async function runImsg(args) {
   try {
@@ -85,8 +95,45 @@ function getOcPendingPath(messageGuid) {
   return join(OC_STATE_DIR, `${encodeStateKey(messageGuid)}.pending.json`)
 }
 
-function formatOcReply(replyText) {
-  return `RC: ${replyText.trim()}`
+function getRequestKindConfig(requestKind) {
+  const config = REQUEST_KIND_CONFIG[requestKind]
+
+  if (!config) {
+    throw new Error(`Unsupported requestKind: ${requestKind}`)
+  }
+
+  return config
+}
+
+function parseRequestText(text) {
+  if (typeof text !== "string") return null
+
+  const trimmed = text.trim()
+
+  for (const [requestKind, config] of Object.entries(REQUEST_KIND_CONFIG)) {
+    if (!trimmed.startsWith(config.incomingPrefix)) continue
+
+    return {
+      requestKind,
+      requestPrefix: config.incomingPrefix,
+      responsePrefix: config.outgoingPrefix,
+    }
+  }
+
+  return null
+}
+
+function resolveRequestKind(requestKind, requestText) {
+  if (requestKind) {
+    getRequestKindConfig(requestKind)
+    return requestKind
+  }
+
+  return parseRequestText(requestText)?.requestKind ?? "rc"
+}
+
+function formatOcReply(replyText, requestKind = "rc") {
+  return `${getRequestKindConfig(requestKind).outgoingPrefix} ${replyText.trim()}`
 }
 
 async function pathExists(filePath) {
@@ -325,14 +372,20 @@ function resolveSendTarget(targetType, targetValue) {
   }
 }
 
-function isRcRequestMessage(message) {
+function parseIncomingRequestMessage(message) {
   if (!message || typeof message !== "object") return false
   if (message.is_from_me === true) return false
-  if (typeof message.guid !== "string" || message.guid.trim() === "") return false
-  if (!Number.isInteger(message.chat_id) || message.chat_id <= 0) return false
-  if (typeof message.text !== "string") return false
+  if (typeof message.guid !== "string" || message.guid.trim() === "") return null
+  if (!Number.isInteger(message.chat_id) || message.chat_id <= 0) return null
+  if (typeof message.text !== "string") return null
 
-  return message.text.trim().startsWith("@RC")
+  const request = parseRequestText(message.text)
+  if (!request) return null
+
+  return {
+    ...message,
+    ...request,
+  }
 }
 
 function getMessageSortTime(message) {
@@ -358,7 +411,8 @@ async function listRcPendingRequests({ chatLimit, messageLimit, limit }) {
 
   const candidates = chatHistories
     .flat()
-    .filter(isRcRequestMessage)
+    .map(parseIncomingRequestMessage)
+    .filter(Boolean)
 
   const requests = []
 
@@ -369,15 +423,18 @@ async function listRcPendingRequests({ chatLimit, messageLimit, limit }) {
     if (status.status === "handled") continue
     if (status.status === "pending" && !isStalePending) continue
 
-    requests.push({
-      chatId: message.chat_id,
-      messageGuid: message.guid,
-      messageId: Number.isFinite(message.id) ? message.id : null,
-      requestText: message.text,
-      sender: message.sender ?? null,
-      createdAt: message.created_at ?? null,
-      status: isStalePending ? "stale_pending" : "new",
-    })
+      requests.push({
+        chatId: message.chat_id,
+        messageGuid: message.guid,
+        messageId: Number.isFinite(message.id) ? message.id : null,
+        requestKind: message.requestKind,
+        requestPrefix: message.requestPrefix,
+        responsePrefix: message.responsePrefix,
+        requestText: message.text,
+        sender: message.sender ?? null,
+        createdAt: message.created_at ?? null,
+        status: isStalePending ? "stale_pending" : "new",
+      })
   }
 
   requests.sort((left, right) => getMessageSortTime(right) - getMessageSortTime(left))
@@ -466,11 +523,11 @@ export const send = tool({
 })
 
 export const rc_pending = tool({
-  description: "List incoming @RC messages that still need a reply.",
+  description: "List incoming @RC or @DRBOZ messages that still need a reply.",
   args: {
     chatLimit: tool.schema.number().int().min(1).max(100).default(20).describe("Maximum recent chats to scan"),
     messageLimit: tool.schema.number().int().min(1).max(200).default(50).describe("Maximum recent messages to inspect per chat"),
-    limit: tool.schema.number().int().min(1).max(200).default(20).describe("Maximum pending @RC requests to return"),
+    limit: tool.schema.number().int().min(1).max(200).default(20).describe("Maximum pending incoming trigger requests to return"),
   },
   async execute(args) {
     return formatResult(await listRcPendingRequests(args))
@@ -478,13 +535,14 @@ export const rc_pending = tool({
 })
 
 export const oc_reply_once = tool({
-  description: "Reply once to an incoming @RC message and persist handled state across OpenCode sessions.",
+  description: "Reply once to an incoming @RC or @DRBOZ message and persist handled state across OpenCode sessions.",
   args: {
-    confirmed: tool.schema.boolean().describe("Must be true only after the user explicitly allowed @RC auto-replies"),
+    confirmed: tool.schema.boolean().describe("Must be true only after the user explicitly allowed incoming trigger auto-replies"),
     chatId: tool.schema.number().int().positive().describe("Chat row ID from imessage_history"),
-    messageGuid: tool.schema.string().min(1).describe("GUID of the incoming @RC message being handled"),
-    replyText: tool.schema.string().min(1).describe("Reply body without the leading 'RC: ' prefix"),
-    requestText: tool.schema.string().optional().describe("Original incoming @RC message text for audit/debugging"),
+    messageGuid: tool.schema.string().min(1).describe("GUID of the incoming trigger message being handled"),
+    requestKind: tool.schema.enum(["rc", "drboz"]).optional().describe("Incoming trigger kind. Defaults to inferring from requestText, then rc"),
+    replyText: tool.schema.string().min(1).describe("Reply body without the leading outgoing trigger prefix"),
+    requestText: tool.schema.string().optional().describe("Original incoming @RC or @DRBOZ text for audit/debugging and request-kind inference"),
     service: tool.schema.enum(["auto", "imessage", "sms"]).default("auto").describe("Preferred delivery service"),
     region: tool.schema.string().optional().describe("Default region for phone normalization, for example US or NL"),
   },
@@ -493,13 +551,18 @@ export const oc_reply_once = tool({
       throw new Error("Refusing to send: user confirmation is required")
     }
 
+    const requestKind = resolveRequestKind(args.requestKind, args.requestText)
+    const requestConfig = getRequestKindConfig(requestKind)
     const replyText = args.replyText.trim()
-    const outgoingText = formatOcReply(replyText)
+    const outgoingText = formatOcReply(replyText, requestKind)
     const claimedAt = new Date().toISOString()
     const claim = await claimOcMessage(args.messageGuid, {
       status: "pending",
       messageGuid: args.messageGuid,
       chatId: args.chatId,
+      requestKind,
+      requestPrefix: requestConfig.incomingPrefix,
+      responsePrefix: requestConfig.outgoingPrefix,
       requestText: args.requestText ?? null,
       replyText,
       outgoingText,
@@ -528,6 +591,9 @@ export const oc_reply_once = tool({
         status: "handled",
         messageGuid: args.messageGuid,
         chatId: args.chatId,
+        requestKind,
+        requestPrefix: requestConfig.incomingPrefix,
+        responsePrefix: requestConfig.outgoingPrefix,
         requestText: args.requestText ?? null,
         replyText,
         outgoingText,
@@ -562,11 +628,11 @@ export const oc_reply_once = tool({
 })
 
 export const oc_status = tool({
-  description: "Inspect persisted @RC reply-once state across OpenCode sessions.",
+  description: "Inspect persisted @RC/@DRBOZ reply-once state across OpenCode sessions.",
   args: {
-    messageGuid: tool.schema.string().optional().describe("Optional GUID of a specific incoming @RC message to inspect"),
-    limit: tool.schema.number().int().min(1).max(200).default(20).describe("Maximum records to return when listing recent @RC state"),
-    includePending: tool.schema.boolean().default(true).describe("Include pending in-flight @RC reply claims when listing recent state"),
+    messageGuid: tool.schema.string().optional().describe("Optional GUID of a specific incoming trigger message to inspect"),
+    limit: tool.schema.number().int().min(1).max(200).default(20).describe("Maximum records to return when listing recent trigger state"),
+    includePending: tool.schema.boolean().default(true).describe("Include pending in-flight trigger reply claims when listing recent state"),
   },
   async execute(args) {
     if (args.messageGuid) {

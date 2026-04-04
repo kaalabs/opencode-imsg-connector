@@ -6,8 +6,8 @@ Global OpenCode custom tools for reading and sending Messages.app chats on macOS
 
 - `imessage_chats` to list recent chats
 - `imessage_history` to read messages from a chat
-- `imessage_rc_pending` to list incoming `@RC` messages that still need a reply
-- `imessage_oc_reply_once` to reply once to an incoming `@RC` message
+- `imessage_rc_pending` to list incoming `@RC` or `@DRBOZ` messages that still need a reply
+- `imessage_oc_reply_once` to reply once to an incoming `@RC` or `@DRBOZ` message
 - `imessage_oc_status` to inspect reply-once state
 - `imessage_send` to send a text message after explicit confirmation
 
@@ -32,6 +32,16 @@ The live global tool file at `~/.config/opencode/tools/imessage.js` re-exports t
 
 This repo also keeps the fake `imsg` helper used for safe tests.
 
+`RC_HEARTBEAT` can now process two inbound trigger styles:
+
+- `@RC` for general chat-style requests
+- `@DRBOZ` for ketoCONTINUUM-style coaching requests grounded in the Remcobrain `ketoCONTINUUM` book
+
+Outgoing auto-replies keep the trigger visible in Messages:
+
+- `@RC` requests send replies prefixed with `RC:`
+- `@DRBOZ` requests send replies prefixed with `DRBOZ:`
+
 ## Start After Login
 
 Use the startup helper to bring up both the headless OpenCode server and the RC heartbeat watcher in the background:
@@ -43,7 +53,7 @@ Use the startup helper to bring up both the headless OpenCode server and the RC 
 Defaults:
 
 - server: `http://127.0.0.1:4096`
-- model: `openai/gpt-5.4-mini`
+- model: `openai/gpt-5.4`
 - agent: `build`
 - prompt: `RC_HEARTBEAT`
 
@@ -53,12 +63,14 @@ Optional overrides:
 ./scripts/start-rc-heartbeat-stack.sh \
   --hostname 127.0.0.1 \
   --port 4096 \
-  --model openai/gpt-5.4-mini \
+  --model openai/gpt-5.4 \
   --agent build \
   --prompt RC_HEARTBEAT
 ```
 
 The script is idempotent: if the local server and watcher are already running, it will reuse them instead of starting duplicates.
+
+The `@DRBOZ` workflow should retrieve cited evidence from the Remcobrain `ketoCONTINUUM` PDF before replying. Because the source can be indexed with unexpected language metadata, the retrieval flow should avoid forcing an English language filter.
 
 By default it writes logs and PID files under `${TMPDIR:-/tmp}/opencode-imsg-connector`.
 

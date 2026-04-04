@@ -23,6 +23,31 @@ function messageEvent(overrides) {
   })
 }
 
+test("watch-rc-heartbeat uses gpt-5.4 as the default model", async () => {
+  const tempDir = await makeTempDir("opencode-watch-default-model-")
+  const logFile = join(tempDir, "opencode-log.ndjson")
+  const stubPath = await createOpencodeStub(tempDir)
+
+  const result = await runCommand(
+    process.execPath,
+    [watchHeartbeatPath, "--server-url", "http://localhost:4096", "--prompt", "RC_HEARTBEAT"],
+    {
+      env: {
+        IMSG_BIN: fakeImsgPath,
+        OPENCODE_BIN: stubPath,
+        OPENCODE_STUB_LOG_FILE: logFile,
+        FAKE_IMSG_WATCH_LINES: messageEvent(),
+        FAKE_IMSG_WATCH_SLEEP_MS: "200",
+      },
+    },
+  )
+
+  assert.equal(result.code, 0)
+  assert.deepEqual((await readNdjson(logFile)).map((entry) => entry.argv), [
+    ["run", "--attach", "http://localhost:4096", "--model", "openai/gpt-5.4", "--agent", "build", "RC_HEARTBEAT"],
+  ])
+})
+
 test("watch-rc-heartbeat suppresses duplicate events by guid", async () => {
   const tempDir = await makeTempDir("opencode-watch-dup-")
   const logFile = join(tempDir, "opencode-log.ndjson")

@@ -17,7 +17,7 @@ import {
   writeStateRecord,
 } from "./helpers.js"
 
-test("rc_pending returns only new and stale inbound @RC requests", async () => {
+test("rc_pending returns only new and stale inbound trigger requests", async () => {
   const home = await makeTempHome()
   const now = new Date("2026-03-30T10:00:00Z")
   const staleTime = new Date(now.getTime() - 16 * 60 * 1000)
@@ -54,6 +54,7 @@ test("rc_pending returns only new and stale inbound @RC requests", async () => {
       { id: 98, identifier: "+31612605237", service: "iMessage", last_message_at: now.toISOString() },
     ]),
     FAKE_IMSG_HISTORY_JSON: JSON.stringify([
+      { id: 12, guid: "GUID-DRBOZ", chat_id: 98, is_from_me: false, text: "@DRBOZ: what should I eat first?", created_at: "2026-03-30T09:45:00Z" },
       { id: 11, guid: "GUID-NEW", chat_id: 98, is_from_me: false, text: "@RC: newest", created_at: now.toISOString() },
       { id: 10, guid: "GUID-STALE", chat_id: 98, is_from_me: false, text: "@RC: stale pending", created_at: "2026-03-30T09:30:00Z" },
       { id: 9, guid: "GUID-HANDLED", chat_id: 98, is_from_me: false, text: "@RC: already handled", created_at: "2026-03-30T09:20:00Z" },
@@ -68,14 +69,70 @@ test("rc_pending returns only new and stale inbound @RC requests", async () => {
 
   const result = await withEnv(env, async () => parseToolResult(await module.rc_pending.execute({ chatLimit: 20, messageLimit: 50, limit: 20 })))
 
-  assert.equal(result.total, 2)
+  assert.equal(result.total, 3)
   assert.deepEqual(
-    result.requests.map((request) => ({ guid: request.messageGuid, status: request.status })),
+    result.requests.map((request) => ({
+      guid: request.messageGuid,
+      status: request.status,
+      requestKind: request.requestKind,
+      requestPrefix: request.requestPrefix,
+      responsePrefix: request.responsePrefix,
+    })),
     [
-      { guid: "GUID-NEW", status: "new" },
-      { guid: "GUID-STALE", status: "stale_pending" },
+      {
+        guid: "GUID-NEW",
+        status: "new",
+        requestKind: "rc",
+        requestPrefix: "@RC",
+        responsePrefix: "RC:",
+      },
+      {
+        guid: "GUID-DRBOZ",
+        status: "new",
+        requestKind: "drboz",
+        requestPrefix: "@DRBOZ",
+        responsePrefix: "DRBOZ:",
+      },
+      {
+        guid: "GUID-STALE",
+        status: "stale_pending",
+        requestKind: "rc",
+        requestPrefix: "@RC",
+        responsePrefix: "RC:",
+      },
     ],
   )
+})
+
+test("oc_reply_once infers drboz mode from requestText and persists request metadata", async () => {
+  const home = await makeTempHome()
+  const env = {
+    HOME: home,
+    IMSG_BIN: fakeImsgPath,
+  }
+  const module = await importFreshModule(imessageSourcePath, env)
+
+  const result = await withEnv(
+    env,
+    async () => parseToolResult(await module.oc_reply_once.execute({
+      confirmed: true,
+      chatId: 98,
+      messageGuid: "GUID-DRBOZ-REPLY",
+      replyText: "Start by protecting your eating window and keeping carbs low.",
+      requestText: "@DRBOZ: what should I do first?",
+      service: "auto",
+      region: "NL",
+    })),
+  )
+
+  assert.equal(result.sent, true)
+  assert.equal(result.text, "DRBOZ: Start by protecting your eating window and keeping carbs low.")
+
+  const record = await readJson(result.statePath)
+  assert.equal(record.requestKind, "drboz")
+  assert.equal(record.requestPrefix, "@DRBOZ")
+  assert.equal(record.responsePrefix, "DRBOZ:")
+  assert.equal(record.outgoingText, result.text)
 })
 
 test("oc_reply_once sends exactly once for concurrent calls", async () => {

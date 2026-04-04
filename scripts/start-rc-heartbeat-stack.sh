@@ -9,7 +9,7 @@ usage() {
 
 hostname="127.0.0.1"
 port="4096"
-model="openai/gpt-5.4-mini"
+model="openai/gpt-5.4"
 agent="build"
 prompt="RC_HEARTBEAT"
 runtime_dir="${RUNTIME_DIR:-${TMPDIR:-/tmp}/opencode-imsg-connector}"
