@@ -264,3 +264,75 @@ test("global tool shim exports the same tool set as the repo source", async () =
 
   assert.deepEqual(Object.keys(globalModule).sort(), Object.keys(repoModule).sort())
 })
+
+test("owpenbot alias exports reuse primary tool implementations", async () => {
+  const home = await makeTempHome()
+  const module = await importFreshModule(imessageSourcePath, {
+    HOME: home,
+    IMSG_BIN: fakeImsgPath,
+  })
+
+  assert.equal(module.owpenbot_chats, module.chats)
+  assert.equal(module.owpenbot_history, module.history)
+  assert.equal(module.owpenbot_send, module.send)
+  assert.equal(module.owpenbot_pending, module.rc_pending)
+  assert.equal(module.owpenbot_reply_once, module.oc_reply_once)
+  assert.equal(module.owpenbot_oc_reply_once, module.oc_reply_once)
+  assert.equal(module.owpenbot_status, module.oc_status)
+  assert.equal(module.owpenbot_oc_status, module.oc_status)
+})
+
+test("owpenbot request kind config overrides incoming/outgoing trigger prefixes", async () => {
+  const home = await makeTempHome()
+  const env = {
+    HOME: home,
+    IMSG_BIN: fakeImsgPath,
+    OWPENBOT_REQUEST_KINDS: JSON.stringify({
+      bot: {
+        incomingPrefix: "@BOT",
+        outgoingPrefix: "BOT:",
+      },
+    }),
+    FAKE_IMSG_CHATS_JSON: JSON.stringify([
+      { id: 99, identifier: "+31612605238", service: "iMessage", last_message_at: "2026-03-30T10:00:00Z" },
+    ]),
+    FAKE_IMSG_HISTORY_JSON: JSON.stringify([
+      { id: 10, guid: "GUID-BOT", chat_id: 99, is_from_me: false, text: "@BOT: status check", created_at: "2026-03-30T10:01:00Z" },
+      { id: 9, guid: "GUID-RC", chat_id: 99, is_from_me: false, text: "@RC: regular", created_at: "2026-03-30T10:00:00Z" },
+    ]),
+  }
+  const module = await importFreshModule(imessageSourcePath, env)
+
+  const pending = await withEnv(env, async () =>
+    parseToolResult(
+      await module.owpenbot_pending.execute({
+        chatLimit: 10,
+        messageLimit: 20,
+        limit: 10,
+      }),
+    ),
+  )
+
+  assert.equal(pending.total, 1)
+  assert.equal(pending.requests[0].requestKind, "bot")
+  assert.equal(pending.requests[0].requestPrefix, "@BOT")
+  assert.equal(pending.requests[0].responsePrefix, "BOT:")
+
+  const reply = await withEnv(env, async () =>
+    parseToolResult(
+      await module.owpenbot_reply_once.execute({
+        confirmed: true,
+        chatId: 99,
+        messageGuid: "GUID-BOT",
+        requestText: "@BOT: status check",
+        replyText: "All good.",
+        service: "auto",
+      }),
+    ),
+  )
+
+  assert.equal(reply.sent, true)
+  assert.equal(reply.text, "BOT: All good.")
+  assert.equal(reply.target.type, "chatId")
+  assert.equal(reply.target.value, "99")
+})

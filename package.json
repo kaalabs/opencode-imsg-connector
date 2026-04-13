@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node --eval \"import('./tools-source/imessage.js')\"",
+    "check": "node --eval \"import('./tools-source/imessage.js'); import('./tools-source/whatsapp.js')\"",
     "test": "node --test test/*.test.js"
   },
   "dependencies": {

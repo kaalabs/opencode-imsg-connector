@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.owpenbot.imessage-connector</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>__START_SCRIPT__</string>
+      <string>--hostname</string>
+      <string>127.0.0.1</string>
+      <string>--port</string>
+      <string>4096</string>
+      <string>--model</string>
+      <string>openai/gpt-5.4</string>
+      <string>--agent</string>
+      <string>build</string>
+      <string>--prompt</string>
+      <string>RC_HEARTBEAT</string>
+      <string>--runtime-dir</string>
+      <string>__RUNTIME_DIR__</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>HOME</key>
+      <string>__HOME__</string>
+      <key>PATH</key>
+      <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+      <key>IMSG_BIN</key>
+      <string>__IMSG_BIN__</string>
+      <key>OPENCODE_BIN</key>
+      <string>__OPENCODE_BIN__</string>
+      <key>NODE_BIN</key>
+      <string>__NODE_BIN__</string>
+      <key>RUNTIME_DIR</key>
+      <string>__RUNTIME_DIR__</string>
+      <!-- Optional: set to override trigger prefixes.
+      <key>OWPENBOT_REQUEST_KINDS</key>
+      <string>{\"bot\":{\"incomingPrefix\":\"@BOT\",\"outgoingPrefix\":\"BOT:\"}}</string> -->
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+      <key>SuccessfulExit</key>
+      <false/>
+      <key>NetworkState</key>
+      <true/>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <key>StandardOutPath</key>
+    <string>__RUNTIME_DIR__/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__RUNTIME_DIR__/launchd.err.log</string>
+  </dict>
+</plist>

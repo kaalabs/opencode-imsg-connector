@@ -1,27 +1,13 @@
 #!/usr/bin/env node
 
-import { execFile, spawn } from "node:child_process"
+import { spawn } from "node:child_process"
 import { createInterface } from "node:readline"
 import { fileURLToPath } from "node:url"
 import { dirname, resolve } from "node:path"
-import { promisify } from "node:util"
 
 const scriptDir = dirname(fileURLToPath(import.meta.url))
 const heartbeatScript = resolve(scriptDir, "rc-heartbeat.sh")
-const imsgBin = process.env.IMSG_BIN ?? "imsg"
-const execFileAsync = promisify(execFile)
-
-const REQUEST_KIND_CONFIG_DEFAULTS = {
-  rc: {
-    incomingPrefix: "@RC",
-  },
-  drboz: {
-    incomingPrefix: "@DRBOZ",
-  },
-}
-const requestKindConfig = resolveRequestKindConfig(process.env.OWPENBOT_REQUEST_KINDS ?? "")
-const fallbackToPoll = process.env.IMSG_FALLBACK_TO_POLL === "1"
-const pollIntervalMs = Number.parseInt(process.env.IMSG_POLL_INTERVAL_MS ?? "5000", 10)
+const whatsappBin = process.env.WHATSAPP_BIN ?? resolve(scriptDir, "whatsapp-cli.js")
 
 function usage(code = 1) {
   process.stderr.write(
@@ -36,13 +22,14 @@ function usage(code = 1) {
       "  --chat-id ID                  Limit watch to a specific chat row ID",
       "  --participants LIST           Comma-separated participant handles",
       "  --since-rowid ID              Start watching after this message row ID",
-      "  --debounce VALUE              imsg watch debounce interval",
+      "  --debounce VALUE              whatsapp watch debounce interval",
       "  --attachments                 Include attachment metadata in watch events",
       "  --reactions                   Include reaction events in the watch stream",
       "  -h, --help                    Show this help",
       "",
       "Environment:",
-      "  IMSG_BIN                      Override the imsg executable path",
+      "  WHATSAPP_BIN                  Override the whatsapp CLI executable path",
+      "  WHATSAPP_REAL_BIN             Override the real WhatsApp CLI when using the wrapper",
       "  OPENCODE_BIN                  Override the opencode executable used by rc-heartbeat.sh",
       "",
     ].join("\n"),
@@ -155,112 +142,51 @@ function eventKey(event) {
   return ""
 }
 
+function parseBoolean(value) {
+  if (typeof value === "boolean") return value
+  if (typeof value === "number") return value !== 0
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase()
+    if (normalized === "") return false
+    if (["true", "1", "yes", "on"].includes(normalized)) return true
+    if (["false", "0", "no", "off"].includes(normalized)) return false
+  }
+  return Boolean(value)
+}
+
 function isIncomingMessage(event) {
   if (!event || typeof event !== "object") return false
-  if (event.is_from_me === true) return false
+  if (event.from_me === true || event.sender === "me" || event.from === "me") return false
   return Boolean(event.guid || event.id !== undefined)
 }
 
-function normalizeRequestKindConfig(rawConfig = "") {
-  const trimmed = String(rawConfig).trim()
-  if (trimmed === "") return { ...REQUEST_KIND_CONFIG_DEFAULTS }
+function normalizeWatchEvent(raw) {
+  if (!raw || typeof raw !== "object") return null
 
-  let parsedConfig
+  const chatId = raw.chat_id ?? raw.chatId ?? raw.chat?.id ?? raw.chat_jid ?? raw.chat ?? raw.jid ?? raw.phone
+  const text = raw.text ?? raw.body ?? raw.content ?? raw.message
+  const timestamp = raw.created_at ?? raw.timestamp ?? raw.createdAt ?? raw.date
+  const guid = raw.guid ?? raw.message_id ?? raw.messageId
+  const id = raw.id ?? raw.msg_id ?? raw.msgId ?? raw.key
+  const fromMe =
+    raw.is_from_me ??
+    raw.from_me ??
+    raw.fromMe ??
+    raw.sender_is_me ??
+    raw.authorized_from_me ??
+    raw.from === "me" ??
+    (typeof raw.from === "object" ? parseBoolean(raw.from?.me) : undefined)
 
-  try {
-    parsedConfig = JSON.parse(trimmed)
-  } catch {
-    return { ...REQUEST_KIND_CONFIG_DEFAULTS }
+  const resolvedText = typeof text === "object" ? text?.body ?? text?.text : text
+
+  return {
+    chat_id: chatId == null ? "" : String(chatId),
+    text: resolvedText,
+    guid: guid == null ? "" : String(guid),
+    id: id == null ? undefined : String(id),
+    from_me: parseBoolean(fromMe),
+    created_at: typeof timestamp === "number" ? new Date(timestamp).toISOString() : timestamp,
   }
-
-  if (!parsedConfig || typeof parsedConfig !== "object" || Array.isArray(parsedConfig)) {
-    return { ...REQUEST_KIND_CONFIG_DEFAULTS }
-  }
-
-  const normalized = {}
-
-  for (const [requestKind, config] of Object.entries(parsedConfig)) {
-    const incomingPrefix = typeof config?.incomingPrefix === "string" ? config.incomingPrefix.trim() : ""
-    if (!incomingPrefix) continue
-    normalized[requestKind] = { incomingPrefix }
-  }
-
-  return Object.keys(normalized).length > 0 ? normalized : { ...REQUEST_KIND_CONFIG_DEFAULTS }
-}
-
-function resolveRequestKindConfig(rawConfig) {
-  return normalizeRequestKindConfig(rawConfig)
-}
-
-function parseRequestText(text) {
-  if (typeof text !== "string") return null
-  const trimmed = text.trim()
-
-  for (const [requestKind, config] of Object.entries(requestKindConfig)) {
-    if (trimmed.startsWith(config.incomingPrefix)) {
-      return { requestKind, requestPrefix: config.incomingPrefix }
-    }
-  }
-
-  return null
-}
-
-function parseImsgOutput(text) {
-  if (!text) return null
-
-  const trimmed = text.trim()
-
-  try {
-    return JSON.parse(trimmed)
-  } catch {}
-
-  const lines = trimmed
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-
-  if (lines.length === 0) return null
-
-  const parsed = []
-
-  for (const line of lines) {
-    try {
-      parsed.push(JSON.parse(line))
-    } catch {
-      return trimmed
-    }
-  }
-
-  return parsed
-}
-
-function parseImsgLines(text) {
-  const parsed = parseImsgOutput(text)
-  if (parsed === null) return []
-  if (Array.isArray(parsed)) return parsed
-  return [parsed]
-}
-
-async function runImsg(args) {
-  try {
-    const result = await execFileAsync(imsgBin, args, {
-      maxBuffer: 10 * 1024 * 1024,
-    })
-
-    return parseImsgLines(result.stdout)
-  } catch (error) {
-    const stderr = error.stderr?.toString().trim()
-    const stdout = error.stdout?.toString().trim()
-    const message = [stderr, stdout, error.message].filter(Boolean).join("\n")
-    throw new Error(message || "imsg command failed")
-  }
-}
-
-function getMessageSortTime(message) {
-  const createdAt = Date.parse(message.created_at ?? message.createdAt ?? "")
-  if (Number.isFinite(createdAt)) return createdAt
-  if (Number.isFinite(message.id)) return message.id
-  return 0
 }
 
 const options = parseArgs(process.argv.slice(2))
@@ -271,7 +197,6 @@ const maxSeenEvents = 500
 let heartbeatRunning = false
 let heartbeatQueued = false
 let stopping = false
-let pollingStarted = false
 
 function rememberEvent(key) {
   if (!key || seenEvents.has(key)) return false
@@ -288,7 +213,7 @@ function rememberEvent(key) {
 }
 
 function log(message) {
-  process.stderr.write(`[watch-rc-heartbeat] ${message}\n`)
+  process.stderr.write(`[watch-whatsapp-heartbeat] ${message}\n`)
 }
 
 function runHeartbeat() {
@@ -323,67 +248,12 @@ function queueHeartbeat() {
   runHeartbeat()
 }
 
-async function pollForIncomingRequests() {
-  const chats = await runImsg(["chats", "--limit", "25", "--json"])
-
-  const histories = await Promise.all(
-    chats.map(async (chat) => {
-      if (!Number.isInteger(chat.id) || chat.id <= 0) return []
-      return await runImsg(["history", "--chat-id", String(chat.id), "--limit", "10", "--json"])
-    }),
-  )
-
-  return histories
-    .flat()
-    .filter((message) => isIncomingMessage(message) && parseRequestText(message.text))
-    .sort((left, right) => getMessageSortTime(left) - getMessageSortTime(right))
-}
-
-async function startPollingLoop() {
-  if (pollingStarted || stopping) return
-  pollingStarted = true
-  log(`switching to polling mode every ${pollIntervalMs}ms`)
-  let seeded = false
-
-  while (!stopping) {
-    try {
-      const messages = await pollForIncomingRequests()
-      let sawNewMessage = false
-
-      for (const message of messages) {
-        const key = eventKey(message)
-        if (!key) continue
-
-        if (!seeded) {
-          rememberEvent(key)
-          continue
-        }
-
-        if (!rememberEvent(key)) continue
-
-        sawNewMessage = true
-        log(`incoming message detected in chat ${message.chat_id ?? "unknown"} via polling`)
-      }
-
-      seeded = true
-
-      if (sawNewMessage) {
-        queueHeartbeat()
-      }
-    } catch (error) {
-      log(`polling failed: ${error.message}`)
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
-  }
-}
-
-const watchProcess = spawn(imsgBin, watchArgs, {
+const watchProcess = spawn(whatsappBin, watchArgs, {
   stdio: ["ignore", "pipe", "inherit"],
   env: process.env,
 })
 
-log(`watching with: ${imsgBin} ${watchArgs.join(" ")}`)
+log(`watching with: ${whatsappBin} ${watchArgs.join(" ")}`)
 log(`heartbeat command: ${buildHeartbeatArgs(options).join(" ")}`)
 
 const lines = createInterface({ input: watchProcess.stdout })
@@ -400,29 +270,22 @@ lines.on("line", (line) => {
     return
   }
 
-  if (!isIncomingMessage(event)) return
+  const normalizedEvent = normalizeWatchEvent(event)
+  if (!normalizedEvent) return
+  if (!isIncomingMessage(normalizedEvent)) return
 
-  const key = eventKey(event)
+  const key = eventKey(normalizedEvent)
   if (key && !rememberEvent(key)) return
 
-  log(`incoming message detected${event.chat_id ? ` in chat ${event.chat_id}` : ""}`)
+  log(`incoming message detected${normalizedEvent.chat_id ? ` in chat ${normalizedEvent.chat_id}` : ""}`)
   queueHeartbeat()
 })
 
 watchProcess.on("exit", (code, signal) => {
-  if (!stopping && fallbackToPoll) {
-    log(`imsg watch exited; enabling polling fallback`)
-    startPollingLoop().catch((error) => {
-      log(`polling fallback failed: ${error.message}`)
-      process.exit(1)
-    })
-    return
-  }
-
   stopping = true
 
   if (signal) {
-    log(`imsg watch exited from signal ${signal}`)
+    log(`whatsapp watch exited from signal ${signal}`)
     process.exit(1)
   }
 

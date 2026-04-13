@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   local code="${1:-1}"
-  printf 'Usage: %s [--hostname HOST] [--port PORT] [--model PROVIDER/MODEL] [--agent AGENT] [--prompt PROMPT] [--runtime-dir DIR] [--request-kinds JSON]\n' "${0##*/}" >&2
+  printf 'Usage: %s [--hostname HOST] [--port PORT] [--model PROVIDER/MODEL] [--agent AGENT] [--prompt PROMPT] [--runtime-dir DIR] [--whatsapp-bin PATH] [--request-kinds JSON]\n' "${0##*/}" >&2
   exit "$code"
 }
 
@@ -17,7 +17,8 @@ request_kinds=""
 
 opencode_bin="${OPENCODE_BIN:-opencode}"
 node_bin="${NODE_BIN:-node}"
-imsg_bin="${IMSG_BIN:-imsg}"
+whatsapp_bin="${WHATSAPP_BIN:-wu}"
+whatsapp_bin_real="${WHATSAPP_REAL_BIN:-$whatsapp_bin}"
 curl_bin="${CURL_BIN:-curl}"
 
 while [[ $# -gt 0 ]]; do
@@ -52,6 +53,11 @@ while [[ $# -gt 0 ]]; do
       runtime_dir="$2"
       shift 2
       ;;
+    --whatsapp-bin)
+      [[ $# -ge 2 ]] || usage
+      whatsapp_bin="$2"
+      shift 2
+      ;;
     --request-kinds)
       [[ $# -ge 2 ]] || usage
       request_kinds="$2"
@@ -69,14 +75,30 @@ done
 
 server_url="http://${hostname}:${port}"
 script_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
-watcher_script="${script_dir}/watch-rc-heartbeat.js"
+whatsapp_cli_wrapper="${script_dir}/whatsapp-cli.js"
+watcher_script="${script_dir}/watch-whatsapp-heartbeat.js"
 
 server_pid_file="${runtime_dir}/opencode-server.pid"
-watcher_pid_file="${runtime_dir}/rc-heartbeat-watcher.pid"
+watcher_pid_file="${runtime_dir}/whatsapp-heartbeat-watcher.pid"
 server_log_file="${runtime_dir}/opencode-server.log"
-watcher_log_file="${runtime_dir}/rc-heartbeat-watcher.log"
+watcher_log_file="${runtime_dir}/whatsapp-heartbeat-watcher.log"
 
-for required_bin in "$opencode_bin" "$node_bin" "$imsg_bin" "$curl_bin"; do
+required_bins=("$opencode_bin" "$node_bin" "$curl_bin")
+
+if [[ -n "${WHATSAPP_REAL_BIN+x}" ]]; then
+  required_bins+=("$whatsapp_bin")
+  if [[ "$whatsapp_bin" == "$whatsapp_cli_wrapper" ]]; then
+    whatsapp_bin="whatsapp-cli"
+  fi
+else
+  if [[ -n "${WHATSAPP_BIN+x}" ]]; then
+    required_bins+=("$whatsapp_bin")
+  else
+    required_bins+=("$whatsapp_cli_wrapper" "$whatsapp_bin")
+  fi
+fi
+
+for required_bin in "${required_bins[@]}"; do
   if ! command -v "$required_bin" >/dev/null 2>&1; then
     printf 'Required command not found: %s\n' "$required_bin" >&2
     exit 1
@@ -150,12 +172,19 @@ else
   fi
 fi
 
-  if watcher_pid="$(read_pid_file "$watcher_pid_file" 2>/dev/null)"; then
+if watcher_pid="$(read_pid_file "$watcher_pid_file" 2>/dev/null)"; then
   watcher_status="already running"
 else
-  watcher_env=(IMSG_BIN="$imsg_bin" OPENCODE_BIN="$opencode_bin")
+  if [[ -n "${WHATSAPP_REAL_BIN+x}" ]]; then
+    watcher_env=(WHATSAPP_BIN="$whatsapp_cli_wrapper" WHATSAPP_REAL_BIN="$whatsapp_bin" OPENCODE_BIN="$opencode_bin")
+  elif [[ -n "${WHATSAPP_BIN+x}" ]]; then
+    watcher_env=(WHATSAPP_BIN="$whatsapp_bin" OPENCODE_BIN="$opencode_bin")
+  else
+    watcher_env=(WHATSAPP_BIN="$whatsapp_cli_wrapper" WHATSAPP_REAL_BIN="$whatsapp_bin" OPENCODE_BIN="$opencode_bin")
+  fi
+
   if [[ -n "$request_kinds" ]]; then
-    watcher_env+=(OWPENBOT_REQUEST_KINDS="$request_kinds")
+    watcher_env+=(WHATSAPP_REQUEST_KINDS="$request_kinds")
   fi
 
   nohup env "${watcher_env[@]}" "$node_bin" "$watcher_script" --server-url "$server_url" --model "$model" --agent "$agent" --prompt "$prompt" >"$watcher_log_file" 2>&1 &
@@ -165,7 +194,7 @@ else
   sleep 1
 
   if ! kill -0 "$watcher_pid" >/dev/null 2>&1; then
-    printf 'RC heartbeat watcher exited during startup\n' >&2
+    printf 'WhatsApp heartbeat watcher exited during startup\n' >&2
     printf 'Watcher log: %s\n' "$watcher_log_file" >&2
     exit 1
   fi
@@ -177,7 +206,7 @@ if [[ -n "$server_pid" ]]; then
 fi
 printf 'Server log: %s\n' "$server_log_file"
 
-printf 'RC heartbeat watcher %s\n' "$watcher_status"
+printf 'WhatsApp heartbeat watcher %s\n' "$watcher_status"
 if [[ -n "$watcher_pid" ]]; then
   printf 'Watcher PID: %s\n' "$watcher_pid"
 fi

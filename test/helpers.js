@@ -8,11 +8,17 @@ const testDir = dirname(fileURLToPath(import.meta.url))
 
 export const repoRoot = resolve(testDir, "..")
 export const fakeImsgPath = join(repoRoot, "scripts", "fake-imsg.js")
+export const fakeWhatsappPath = join(repoRoot, "scripts", "fake-whatsapp.js")
 export const imessageSourcePath = join(repoRoot, "tools-source", "imessage.js")
+export const whatsappSourcePath = join(repoRoot, "tools-source", "whatsapp.js")
 export const globalImessagePath = "/Users/rrk/.config/opencode/tools/imessage.js"
 export const rcHeartbeatPath = join(repoRoot, "scripts", "rc-heartbeat.sh")
 export const watchHeartbeatPath = join(repoRoot, "scripts", "watch-rc-heartbeat.js")
 export const startStackPath = join(repoRoot, "scripts", "start-rc-heartbeat-stack.sh")
+export const watchWhatsappHeartbeatPath = join(repoRoot, "scripts", "watch-whatsapp-heartbeat.js")
+export const startWhatsappStackPath = join(repoRoot, "scripts", "start-whatsapp-heartbeat-stack.sh")
+export const runAllHeartbeatServicePath = join(repoRoot, "scripts", "run-all-heartbeat-service.js")
+export const startAllStackPath = join(repoRoot, "scripts", "start-all-heartbeat-stack.sh")
 
 export async function makeTempDir(prefix) {
   return mkdtemp(join(tmpdir(), prefix))
@@ -21,11 +27,13 @@ export async function makeTempDir(prefix) {
 export async function makeTempHome(prefix = "opencode-imsg-home-") {
   const home = await makeTempDir(prefix)
   await mkdir(join(home, ".config", "opencode", "state", "imessage-oc"), { recursive: true })
+  await mkdir(join(home, ".config", "opencode", "state", "whatsapp-oc"), { recursive: true })
   return home
 }
 
-export function stateDirForHome(home) {
-  return join(home, ".config", "opencode", "state", "imessage-oc")
+export function stateDirForHome(home, kind = "imessage") {
+  const folder = kind === "whatsapp" ? "whatsapp-oc" : "imessage-oc"
+  return join(home, ".config", "opencode", "state", folder)
 }
 
 export function encodeStateKey(value) {
@@ -33,7 +41,7 @@ export function encodeStateKey(value) {
 }
 
 export async function writeStateRecord(home, messageGuid, type, record, options = {}) {
-  const stateDir = stateDirForHome(home)
+  const stateDir = stateDirForHome(home, options.channel ?? "imessage")
   const suffix = type === "pending" ? ".pending.json" : ".json"
   const filePath = join(stateDir, `${encodeStateKey(messageGuid)}${suffix}`)
 
