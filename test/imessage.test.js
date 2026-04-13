@@ -251,6 +251,185 @@ test("oc_reply_once reclaims stale pending messages", async () => {
   assert.equal(record.status, "handled")
 })
 
+test("signal_once sends exactly once for concurrent calls", async () => {
+  const home = await makeTempHome()
+  const logFile = `${stateDirForHome(home)}/fake-imsg-signal.ndjson`
+  const env = {
+    HOME: home,
+    IMSG_BIN: fakeImsgPath,
+    FAKE_IMSG_SEND_SLEEP_MS: "150",
+    FAKE_IMSG_LOG_FILE: logFile,
+  }
+  const module = await importFreshModule(imessageSourcePath, env)
+
+  const request = {
+    confirmed: true,
+    dedupeKey: "email:msg-1@example.com",
+    chatId: 144,
+    text: "RC: incoming relevant email 2026-04-13 15:20 Alice Quarterly update",
+    service: "auto",
+    region: "NL",
+  }
+
+  const [left, right] = await withEnv(env, async () =>
+    Promise.all([
+      module.signal_once.execute(request),
+      module.signal_once.execute(request),
+    ]),
+  )
+  const results = [parseToolResult(left), parseToolResult(right)]
+
+  assert.equal(results.filter((result) => result.sent === true).length, 1)
+  assert.equal(results.filter((result) => result.skipped === true).length, 1)
+  assert.equal(results.find((result) => result.skipped === true)?.reason, "already_pending")
+
+  const sendCalls = (await readNdjson(logFile)).filter((entry) => entry.command === "send")
+  assert.equal(sendCalls.length, 1)
+})
+
+test("signal_once cleans up pending state after send failure and can retry", async () => {
+  const home = await makeTempHome()
+
+  const failingEnv = {
+    HOME: home,
+    IMSG_BIN: fakeImsgPath,
+    FAKE_IMSG_SEND_FAIL: "1",
+    FAKE_IMSG_SEND_FAIL_STDERR: "intentional send failure",
+  }
+  const failingModule = await importFreshModule(imessageSourcePath, failingEnv)
+
+  const request = {
+    confirmed: true,
+    dedupeKey: "email:msg-2@example.com",
+    chatId: 144,
+    text: "RC: incoming relevant email 2026-04-13 15:30 Bob Action needed",
+    service: "auto",
+    region: "NL",
+  }
+
+  await assert.rejects(() => withEnv(failingEnv, async () => failingModule.signal_once.execute(request)), /intentional send failure/)
+
+  const retryEnv = {
+    HOME: home,
+    IMSG_BIN: fakeImsgPath,
+  }
+  const retryModule = await importFreshModule(imessageSourcePath, retryEnv)
+  const retryResult = await withEnv(retryEnv, async () => parseToolResult(await retryModule.signal_once.execute(request)))
+
+  assert.equal(retryResult.sent, true)
+  assert.equal(await fileExists(retryResult.statePath), true)
+})
+
+test("signal_email_once formats a readable multi-line email alert", async () => {
+  const home = await makeTempHome()
+  const logFile = `${stateDirForHome(home)}/fake-imsg-email-signal.ndjson`
+  const env = {
+    HOME: home,
+    IMSG_BIN: fakeImsgPath,
+    FAKE_IMSG_LOG_FILE: logFile,
+  }
+  const module = await importFreshModule(imessageSourcePath, env)
+
+  const result = await withEnv(
+    env,
+    async () => parseToolResult(await module.signal_email_once.execute({
+      confirmed: true,
+      dedupeKey: "email:msg-3@example.com",
+      chatId: 144,
+      dateReceived: "2026-04-13T13:40:09.645Z",
+      from: "Apple <no_reply@email.apple.com>",
+      subject: "X Premium monthly renewal",
+      summaryLines: [
+        "Charge: EUR 5.49 incl. 21% VAT.",
+        "Order ML7WVS9VWH.",
+        "Renews 13 May 2026.",
+      ],
+      service: "auto",
+      region: "NL",
+    })),
+  )
+
+  assert.equal(result.sent, true)
+  assert.equal(
+    result.text,
+    [
+      "RC: incoming relevant email",
+      "13 Apr 15:40",
+      "From: Apple <no_reply@email.apple.com>",
+      "Subject: X Premium monthly renewal",
+      "- Charge: EUR 5.49 incl. 21% VAT.",
+      "- Order ML7WVS9VWH.",
+      "- Renews 13 May 2026.",
+    ].join("\n"),
+  )
+
+  const sendCalls = (await readNdjson(logFile)).filter((entry) => entry.command === "send")
+  const textIndex = sendCalls[0].argv.indexOf("--text")
+  assert.equal(sendCalls[0].argv[textIndex + 1], result.text)
+
+  const record = await readJson(result.statePath)
+  assert.equal(record.signalKind, "email")
+  assert.deepEqual(record.summaryLines, [
+    "Charge: EUR 5.49 incl. 21% VAT.",
+    "Order ML7WVS9VWH.",
+    "Renews 13 May 2026.",
+  ])
+})
+
+test("history strips leaked attributedBody length prefix bytes from imsg text", async () => {
+  const home = await makeTempHome()
+  const currentAlert = [
+    "RC: incoming relevant email",
+    "13 Apr 16:59",
+    "From: Caroline En Remco <mail@baldrskogen.se>",
+    "Subject: Graag direct naar kijken",
+    "- Kees asks you to look at this message directly.",
+    "- He says it would be very good to discuss together tomorrow when you see each other.",
+    "- Personal, action-oriented note forwarded from iPhone.",
+  ].join("\n")
+  const previousAlert = [
+    "RC: incoming relevant email 2026-04-13 15:40 Apple <no_reply@email.apple.com>",
+    "Apple invoice for X Premium monthly renewal.",
+    "Charge: EUR 5,49 incl. 21% VAT.",
+    "Order ML7WVS9VWH; renews 13 May 2026.",
+  ].join("\n")
+  const env = {
+    HOME: home,
+    IMSG_BIN: fakeImsgPath,
+    FAKE_IMSG_HISTORY_JSON: JSON.stringify([
+      {
+        id: 3926,
+        guid: "GUID-ATTRIBUTED-BODY",
+        chat_id: 144,
+        is_from_me: true,
+        text: `\uFFFD8\u0001${currentAlert}`,
+        created_at: "2026-04-13T15:16:19.535Z",
+      },
+      {
+        id: 3925,
+        guid: "GUID-ATTRIBUTED-BODY-2",
+        chat_id: 144,
+        is_from_me: true,
+        text: `\uFFFD\uFFFD\u0000${previousAlert}`,
+        created_at: "2026-04-13T14:50:13.970Z",
+      },
+    ]),
+  }
+  const module = await importFreshModule(imessageSourcePath, env)
+
+  const result = await withEnv(
+    env,
+    async () => parseToolResult(await module.history.execute({
+      chatId: 144,
+      limit: 10,
+      includeAttachments: false,
+    })),
+  )
+
+  assert.equal(result.messages[0].text, currentAlert)
+  assert.equal(result.messages[1].text, previousAlert)
+})
+
 test("global tool shim exports the same tool set as the repo source", async () => {
   const home = await makeTempHome()
   const repoModule = await importFreshModule(imessageSourcePath, {

@@ -10,6 +10,7 @@ const execFileAsync = promisify(execFile)
 const IMSG_BIN = process.env.IMSG_BIN ?? "imsg"
 const OPENCODE_HOME = join(homedir(), ".config", "opencode")
 const OC_STATE_DIR = join(OPENCODE_HOME, "state", "imessage-oc")
+const SIGNAL_STATE_DIR = join(OPENCODE_HOME, "state", "imessage-signal")
 const OC_PENDING_MAX_AGE_MS = 15 * 60 * 1000
 const REQUEST_KIND_CONFIG_DEFAULTS = {
   rc: {
@@ -145,13 +146,63 @@ function parseImsgOutput(text) {
   return parsed
 }
 
+function stripAttributedBodyLengthPrefix(text) {
+  if (typeof text !== "string" || text.length < 4) return text
+
+  const characters = Array.from(text)
+  if (characters.length < 4) return text
+
+  const [marker, lowByte, highByte] = characters
+  const markerCode = marker.codePointAt(0)
+  const lowByteCode = lowByte.codePointAt(0)
+  const highByteCode = highByte.codePointAt(0)
+
+  if (markerCode !== 0xfffd) return text
+  if (highByteCode > 0xff) return text
+  if (lowByteCode > 0xff && lowByteCode !== 0xfffd) return text
+
+  const remainder = characters.slice(3).join("")
+  if (!remainder) return text
+
+  const firstRemainderCode = remainder.codePointAt(0)
+  if (firstRemainderCode === undefined || firstRemainderCode < 0x20 || firstRemainderCode === 0x7f) {
+    return text
+  }
+
+  if (lowByteCode !== 0xfffd) {
+    const expectedLength = lowByteCode + highByteCode * 256
+    if (expectedLength !== remainder.length) return text
+  } else {
+    const minExpectedLength = 128 + highByteCode * 256
+    const maxExpectedLength = 255 + highByteCode * 256
+    if (remainder.length < minExpectedLength || remainder.length > maxExpectedLength) {
+      return text
+    }
+  }
+
+  return remainder
+}
+
+function sanitizeImsgRecord(record) {
+  if (!record || typeof record !== "object" || Array.isArray(record)) return record
+
+  if (typeof record.text === "string") {
+    return {
+      ...record,
+      text: stripAttributedBodyLengthPrefix(record.text),
+    }
+  }
+
+  return record
+}
+
 function parseImsgLines(text) {
   const parsed = parseImsgOutput(text)
 
   if (parsed === null) return []
-  if (Array.isArray(parsed)) return parsed
+  if (Array.isArray(parsed)) return parsed.map((entry) => sanitizeImsgRecord(entry))
 
-  return [parsed]
+  return [sanitizeImsgRecord(parsed)]
 }
 
 function formatResult(payload) {
@@ -162,12 +213,28 @@ function encodeStateKey(value) {
   return Buffer.from(value, "utf8").toString("hex")
 }
 
+function getStateHandledPath(stateDir, key) {
+  return join(stateDir, `${encodeStateKey(key)}.json`)
+}
+
+function getStatePendingPath(stateDir, key) {
+  return join(stateDir, `${encodeStateKey(key)}.pending.json`)
+}
+
 function getOcHandledPath(messageGuid) {
-  return join(OC_STATE_DIR, `${encodeStateKey(messageGuid)}.json`)
+  return getStateHandledPath(OC_STATE_DIR, messageGuid)
 }
 
 function getOcPendingPath(messageGuid) {
-  return join(OC_STATE_DIR, `${encodeStateKey(messageGuid)}.pending.json`)
+  return getStatePendingPath(OC_STATE_DIR, messageGuid)
+}
+
+function getSignalHandledPath(dedupeKey) {
+  return getStateHandledPath(SIGNAL_STATE_DIR, dedupeKey)
+}
+
+function getSignalPendingPath(dedupeKey) {
+  return getStatePendingPath(SIGNAL_STATE_DIR, dedupeKey)
 }
 
 function getRequestKindConfig(requestKind) {
@@ -224,8 +291,8 @@ async function readJsonFile(filePath) {
   return JSON.parse(await readFile(filePath, "utf8"))
 }
 
-async function ensureOcStateDir() {
-  await mkdir(OC_STATE_DIR, { recursive: true })
+async function ensureStateDir(stateDir) {
+  await mkdir(stateDir, { recursive: true })
 }
 
 async function isPendingClaimStale(filePath) {
@@ -242,10 +309,10 @@ async function releasePendingClaim(filePath) {
   await rm(filePath, { force: true })
 }
 
-async function claimOcMessage(messageGuid, pendingRecord) {
-  await ensureOcStateDir()
+async function claimStateKey(stateDir, key, pendingRecord) {
+  await ensureStateDir(stateDir)
 
-  const handledPath = getOcHandledPath(messageGuid)
+  const handledPath = getStateHandledPath(stateDir, key)
   if (await pathExists(handledPath)) {
     return {
       claimed: false,
@@ -255,7 +322,7 @@ async function claimOcMessage(messageGuid, pendingRecord) {
     }
   }
 
-  const pendingPath = getOcPendingPath(messageGuid)
+  const pendingPath = getStatePendingPath(stateDir, key)
 
   try {
     await writeFile(pendingPath, JSON.stringify(pendingRecord, null, 2), { flag: "wx" })
@@ -279,7 +346,7 @@ async function claimOcMessage(messageGuid, pendingRecord) {
 
     if (await isPendingClaimStale(pendingPath)) {
       await releasePendingClaim(pendingPath)
-      return claimOcMessage(messageGuid, pendingRecord)
+      return claimStateKey(stateDir, key, pendingRecord)
     }
 
     return {
@@ -289,6 +356,14 @@ async function claimOcMessage(messageGuid, pendingRecord) {
       pendingPath,
     }
   }
+}
+
+async function claimOcMessage(messageGuid, pendingRecord) {
+  return await claimStateKey(OC_STATE_DIR, messageGuid, pendingRecord)
+}
+
+async function claimSignal(dedupeKey, pendingRecord) {
+  return await claimStateKey(SIGNAL_STATE_DIR, dedupeKey, pendingRecord)
 }
 
 function getOcRecordSortTime(record, fallbackTimeMs) {
@@ -447,6 +522,125 @@ function resolveSendTarget(targetType, targetValue) {
   }
 }
 
+function normalizeSingleLineText(value) {
+  if (typeof value !== "string") return ""
+  return value.replace(/\s+/g, " ").trim()
+}
+
+function formatLocalSignalDateTime(dateInput) {
+  const parsed = new Date(dateInput)
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error("dateReceived must be a valid date string")
+  }
+
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(parsed)
+
+  const values = Object.fromEntries(parts.filter((part) => part.type !== "literal").map((part) => [part.type, part.value]))
+  return `${values.day} ${values.month} ${values.hour}:${values.minute}`
+}
+
+function formatEmailSignalText({ dateReceived, from, subject, summaryLines }) {
+  const formattedLines = []
+  const formattedDateTime = formatLocalSignalDateTime(dateReceived)
+  const formattedFrom = normalizeSingleLineText(from)
+  const formattedSubject = normalizeSingleLineText(subject)
+  const normalizedSummaryLines = Array.isArray(summaryLines)
+    ? summaryLines.map((line) => normalizeSingleLineText(line)).filter(Boolean).slice(0, 3)
+    : []
+
+  formattedLines.push("RC: incoming relevant email")
+  formattedLines.push(formattedDateTime)
+
+  if (formattedFrom) {
+    formattedLines.push(`From: ${formattedFrom}`)
+  }
+
+  if (formattedSubject) {
+    formattedLines.push(`Subject: ${formattedSubject}`)
+  }
+
+  for (const line of normalizedSummaryLines) {
+    formattedLines.push(`- ${line.replace(/^-+\s*/, "")}`)
+  }
+
+  return formattedLines.join("\n")
+}
+
+async function executeSignalOnce({ confirmed, dedupeKey, chatId, text, service, region, recordExtras = {} }) {
+  if (!confirmed) {
+    throw new Error("Refusing to send: user confirmation is required")
+  }
+
+  const trimmedText = text.trim()
+  const claimedAt = new Date().toISOString()
+  const claim = await claimSignal(dedupeKey, {
+    status: "pending",
+    dedupeKey,
+    chatId,
+    text: trimmedText,
+    claimedAt,
+    ...recordExtras,
+  })
+
+  if (!claim.claimed) {
+    return formatResult({
+      sent: false,
+      skipped: true,
+      reason: claim.reason,
+      dedupeKey,
+      statePath: claim.handledPath,
+      record: claim.record ?? null,
+    })
+  }
+
+  try {
+    const command = ["send", "--chat-id", String(chatId), "--text", trimmedText, "--service", service, "--json"]
+    pushOptional(command, "--region", region)
+
+    const result = await runImsg(command)
+    const handledAt = new Date().toISOString()
+    const parsedResult = parseImsgOutput(result.stdout) ?? result.stdout
+    const record = {
+      status: "handled",
+      dedupeKey,
+      chatId,
+      text: trimmedText,
+      claimedAt,
+      handledAt,
+      service,
+      result: parsedResult,
+      ...recordExtras,
+    }
+
+    await writeFile(claim.handledPath, JSON.stringify(record, null, 2))
+    await releasePendingClaim(claim.pendingPath)
+
+    return formatResult({
+      sent: true,
+      skipped: false,
+      dedupeKey,
+      target: {
+        type: "chatId",
+        value: String(chatId),
+      },
+      text: trimmedText,
+      service,
+      result: parsedResult,
+      statePath: claim.handledPath,
+      stderr: result.stderr || null,
+    })
+  } catch (error) {
+    await releasePendingClaim(claim.pendingPath)
+    throw error
+  }
+}
+
 function parseIncomingRequestMessage(message) {
   if (!message || typeof message !== "object") return false
   if (message.is_from_me === true) return false
@@ -593,6 +787,61 @@ export const send = tool({
       service: args.service,
       result: parseImsgOutput(result.stdout) ?? result.stdout,
       stderr: result.stderr || null,
+    })
+  },
+})
+
+export const signal_once = tool({
+  description: "Send a text message to a specific chat at most once for a dedupe key.",
+  args: {
+    confirmed: tool.schema.boolean().describe("Must be true only after the user explicitly allowed these automated signal messages"),
+    dedupeKey: tool.schema.string().min(1).describe("Stable key used to prevent duplicate signals, for example email:<rfc-message-id>"),
+    chatId: tool.schema.number().int().positive().describe("Chat row ID to send the signal into"),
+    text: tool.schema.string().min(1).describe("Full message body to send"),
+    service: tool.schema.enum(["auto", "imessage", "sms"]).default("auto").describe("Preferred delivery service"),
+    region: tool.schema.string().optional().describe("Default region for phone normalization, for example US or NL"),
+  },
+  async execute(args) {
+    return await executeSignalOnce(args)
+  },
+})
+
+export const signal_email_once = tool({
+  description: "Send a formatted email self-alert to a specific chat at most once for a dedupe key.",
+  args: {
+    confirmed: tool.schema.boolean().describe("Must be true only after the user explicitly allowed these automated email signals"),
+    dedupeKey: tool.schema.string().min(1).describe("Stable key used to prevent duplicate signals, for example email:<rfc-message-id>"),
+    chatId: tool.schema.number().int().positive().describe("Chat row ID to send the signal into"),
+    dateReceived: tool.schema.string().min(1).describe("Email received timestamp as an ISO8601 string or other parseable date string"),
+    from: tool.schema.string().min(1).describe("Email sender display text"),
+    subject: tool.schema.string().optional().describe("Email subject line"),
+    summaryLines: tool.schema.array(tool.schema.string()).optional().describe("Up to three short summary lines; one fact per line"),
+    service: tool.schema.enum(["auto", "imessage", "sms"]).default("auto").describe("Preferred delivery service"),
+    region: tool.schema.string().optional().describe("Default region for phone normalization, for example US or NL"),
+  },
+  async execute(args) {
+    const summaryLines = Array.isArray(args.summaryLines) ? args.summaryLines.slice(0, 3) : []
+    const text = formatEmailSignalText({
+      dateReceived: args.dateReceived,
+      from: args.from,
+      subject: args.subject,
+      summaryLines,
+    })
+
+    return await executeSignalOnce({
+      confirmed: args.confirmed,
+      dedupeKey: args.dedupeKey,
+      chatId: args.chatId,
+      text,
+      service: args.service,
+      region: args.region,
+      recordExtras: {
+        signalKind: "email",
+        dateReceived: args.dateReceived,
+        from: normalizeSingleLineText(args.from),
+        subject: normalizeSingleLineText(args.subject),
+        summaryLines: summaryLines.map((line) => normalizeSingleLineText(line)).filter(Boolean),
+      },
     })
   },
 })

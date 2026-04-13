@@ -15,6 +15,7 @@ usage() {
   printf '  --agent AGENT                 Agent passed to watcher (default: build)\\n' >&2
   printf '  --prompt PROMPT               Prompt passed to watcher (default: RC_HEARTBEAT)\\n' >&2
   printf '  --imsg-bin PATH               Path to imsg binary (default: imsg)\\n' >&2
+  printf '  --amen-bin PATH               Path to amen binary (default: amen)\\n' >&2
   printf '  --whatsapp-bin PATH           Path to WhatsApp CLI (default: wu)\\n' >&2
   printf '  --whatsapp-real-bin PATH      Path to real WhatsApp CLI when using wrapper\\n' >&2
   printf '  --opencode-bin PATH           Path to opencode binary (default: opencode)\\n' >&2
@@ -46,6 +47,7 @@ model="openai/gpt-5.4"
 agent="build"
 prompt="RC_HEARTBEAT"
 imsg_bin="${IMSG_BIN:-imsg}"
+amen_bin="${AMEN_BIN:-amen}"
 whatsapp_bin="${WHATSAPP_BIN:-wu}"
 whatsapp_real_bin="${WHATSAPP_REAL_BIN:-}"
 opencode_bin="${OPENCODE_BIN:-opencode}"
@@ -111,6 +113,11 @@ while [[ $# -gt 0 ]]; do
     --imsg-bin)
       [[ $# -ge 2 ]] || usage
       imsg_bin="$2"
+      shift 2
+      ;;
+    --amen-bin)
+      [[ $# -ge 2 ]] || usage
+      amen_bin="$2"
       shift 2
       ;;
     --whatsapp-bin)
@@ -194,6 +201,15 @@ if [[ ! -x "$imsg_bin" ]]; then
   exit 1
 fi
 
+if [[ "$amen_bin" != */* ]]; then
+  amen_bin="$(command -v "$amen_bin" || true)"
+fi
+
+if [[ ! -x "$amen_bin" ]]; then
+  printf 'amen binary not found/executable: %s\\n' "$amen_bin" >&2
+  exit 1
+fi
+
 if [[ "$whatsapp_bin" != */* ]]; then
   whatsapp_bin="$(command -v "$whatsapp_bin" || true)"
 fi
@@ -264,7 +280,8 @@ mkdir -p "$plist_dir"
 plist_path="$plist_dir/$label.plist"
 escaped_home="$(escape_xml "$HOME")"
 escaped_runtime_dir="$(escape_xml "$runtime_dir")"
-escaped_imsg_bin="$(escape_xml "$bundled_imsg_bin")"
+escaped_imsg_bin="$(escape_xml "$imsg_bin")"
+escaped_amen_bin="$(escape_xml "$amen_bin")"
 escaped_whatsapp_bin="$(escape_xml "$bundled_whatsapp_bin")"
 escaped_whatsapp_package_root="$(escape_xml "$bundled_whatsapp_package_root")"
 escaped_opencode_bin="$(escape_xml "$opencode_bin")"
@@ -352,6 +369,8 @@ cat >> "$plist_path" <<EOF
       <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
       <key>IMSG_BIN</key>
       <string>${escaped_imsg_bin}</string>
+      <key>AMEN_BIN</key>
+      <string>${escaped_amen_bin}</string>
       <key>WHATSAPP_BIN</key>
       <string>${escaped_whatsapp_bin}</string>
       <key>WHATSAPP_PACKAGE_ROOT</key>

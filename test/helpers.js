@@ -9,9 +9,12 @@ const testDir = dirname(fileURLToPath(import.meta.url))
 export const repoRoot = resolve(testDir, "..")
 export const fakeImsgPath = join(repoRoot, "scripts", "fake-imsg.js")
 export const fakeWhatsappPath = join(repoRoot, "scripts", "fake-whatsapp.js")
+export const fakeAmenPath = join(repoRoot, "scripts", "fake-amen.js")
 export const imessageSourcePath = join(repoRoot, "tools-source", "imessage.js")
 export const whatsappSourcePath = join(repoRoot, "tools-source", "whatsapp.js")
+export const amenSourcePath = join(repoRoot, "tools-source", "amen.js")
 export const globalImessagePath = "/Users/rrk/.config/opencode/tools/imessage.js"
+export const globalAmenPath = "/Users/rrk/.config/opencode/tools/amen.js"
 export const rcHeartbeatPath = join(repoRoot, "scripts", "rc-heartbeat.sh")
 export const watchHeartbeatPath = join(repoRoot, "scripts", "watch-rc-heartbeat.js")
 export const startStackPath = join(repoRoot, "scripts", "start-rc-heartbeat-stack.sh")
@@ -19,6 +22,7 @@ export const watchWhatsappHeartbeatPath = join(repoRoot, "scripts", "watch-whats
 export const startWhatsappStackPath = join(repoRoot, "scripts", "start-whatsapp-heartbeat-stack.sh")
 export const runAllHeartbeatServicePath = join(repoRoot, "scripts", "run-all-heartbeat-service.js")
 export const startAllStackPath = join(repoRoot, "scripts", "start-all-heartbeat-stack.sh")
+export const checkAmenHeartbeatPath = join(repoRoot, "scripts", "check-amen-heartbeat.js")
 
 export async function makeTempDir(prefix) {
   return mkdtemp(join(tmpdir(), prefix))
